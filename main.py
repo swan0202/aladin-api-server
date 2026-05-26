@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import requests
 from bs4 import BeautifulSoup
-import re # 텍스트 전체를 스캔하는 정규표현식 모듈
+import re
 
 app = FastAPI()
 
@@ -42,69 +42,56 @@ def search_books(query: str):
     if "item" in data:
         for book in data["item"]:
             if "cover" in book:
-                high_res_cover = book["cover"].replace("coversum", "cover500").replace("cover200", "cover500").replace("/cover/", "/cover500/")
-                book["cover"] = high_res_cover
+                book["cover"] = book["cover"].replace("coversum", "cover500").replace("cover200", "cover500").replace("/cover/", "/cover500/")
                 
     return data
 
+def format_url(src):
+    if not src: return None
+    if src.startswith('//'): return 'https:' + src
+    if src.startswith('/'): return 'https://image.aladin.co.kr' + src
+    if src.startswith('http://'): return src.replace('http://', 'https://')
+    return src
+
 @app.get("/api/get-book-images")
 def get_book_images(item_id: str):
-    # 1. 네가 찾아낸 PC 버전 미리보기 URL 접속
-    url = f"https://www.aladin.co.kr/shop/book/wletslookViewer.aspx?ItemId={item_id}"
+    # 1. 네가 제보해준 도서 상세페이지(wproduct.aspx)를 메인 타겟으로 씁니다!
+    url = f"https://www.aladin.co.kr/shop/wproduct.aspx?ItemId={item_id}"
     response = requests.get(url)
     soup = BeautifulSoup(response.text, 'html.parser')
     
     images = {"front": None, "spine": None, "back": None}
     
-    # 2. BeautifulSoup으로 <img> 태그 전체 수집
-    img_tags = soup.find_all('img')
-    img_urls = [img.get('src', '') for img in img_tags]
+    # 2. 캡처 화면에서 확인한 HTML 클래스명으로 핀포인트 저격 🔫
+    c_front = soup.select_one('.c_front img')
+    c_spine = soup.select_one('.c_left img')
+    c_back = soup.select_one('.c_back img')
     
-    # 3. HTML 안에 JS 코드로 꽁꽁 숨겨진 이미지 주소까지 정규식으로 추가 싹쓸이
-    hidden_urls = re.findall(r'(?:https?:)?//[^"\'\s>]+aladin\.co\.kr[^"\'\s>]+\.jpg', response.text)
-    
-    # 4. 두 결과를 합치고 중복 제거
-    all_urls = list(set(img_urls + hidden_urls))
-    
-    for src in all_urls:
-        if not src: continue
-        
-        # 보안(CORS) 에러 방지 및 절대 경로 변환
-        if src.startswith('//'):
-            src = 'https:' + src
-        elif src.startswith('/'):
-            src = 'https://image.aladin.co.kr' + src
-        elif src.startswith('http://'):
-            src = src.replace('http://', 'https://')
-            
-        # [분류 작업] 네가 본 이미지 URL 패턴을 바탕으로 매칭
-        # 뒷표지 (보통 _wbl, _bl, _b 로 끝남)
-        if re.search(r'_(wbl|bl|b)\.jpg', src):
-            images['back'] = src
-        # 책등 (보통 Spine 폴더에 있거나 _sl, _s 로 끝남)
-        elif re.search(r'(_sl|_s|Spine)\.jpg', src, re.IGNORECASE):
-            images['spine'] = src
-        # 앞표지 (보통 _wfl, _fl, _f 로 끝남)
-        elif re.search(r'_(wfl|fl|f)\.jpg', src) and not images['front']:
-            images['front'] = src
+    if c_front and c_front.get('src'):
+        images['front'] = format_url(c_front.get('src'))
+    if c_spine and c_spine.get('src'):
+        images['spine'] = format_url(c_spine.get('src'))
+    if c_back and c_back.get('src'):
+        images['back'] = format_url(c_back.get('src'))
 
-    # 5. 혹시라도 PC 버전에서 못 찾았다면 모바일 페이지로 2차 크롤링 (안전장치)
-    if not images['front'] or not images['spine'] or not images['back']:
-        m_url = f"https://www.aladin.co.kr/m/mletslooks.aspx?ItemId={item_id}"
-        m_response = requests.get(m_url)
-        m_urls = re.findall(r'(?:https?:)?//[^"\'\s>]+aladin\.co\.kr[^"\'\s>]+\.jpg', m_response.text)
+    # 3. 혹시나 클래스명이 렌더링되지 않았을 경우를 대비한 2차 안전장치
+    # (네가 알려준 /spineflip/ 폴더와 _d.jpg 패턴을 정규식에 추가했어!)
+    if not images['spine'] or not images['back']:
+        all_urls = re.findall(r'(?:https?:)?//image\.aladin\.co\.kr/[^"\'\s>]*\.(?:jpg|png)', response.text, re.IGNORECASE)
         
-        for src in m_urls:
-            if not src: continue
-            if src.startswith('//'): src = 'https:' + src
-            elif src.startswith('/'): src = 'https://image.aladin.co.kr' + src
-            elif src.startswith('http://'): src = src.replace('http://', 'https://')
-            
-            if re.search(r'_(wbl|bl|b)\.jpg', src) and not images['back']:
+        for src in all_urls:
+            src = format_url(src)
+            # 뒷표지 (_b.jpg)
+            if re.search(r'_(wbl|bl|b)\.jpg$', src, re.IGNORECASE) and not images['back']:
                 images['back'] = src
-            elif re.search(r'(_sl|_s|Spine)\.jpg', src, re.IGNORECASE) and not images['spine']:
+            # 책등 (/spineflip/ 폴더 또는 _d.jpg)
+            elif re.search(r'(/spineflip/|_(sl|s|d)\.jpg$)', src, re.IGNORECASE) and not images['spine']:
                 images['spine'] = src
-            elif re.search(r'_(wfl|fl|f)\.jpg', src) and not images['front']:
+            # 앞표지
+            elif re.search(r'_(wfl|fl|f)\.jpg$', src, re.IGNORECASE) and not images['front']:
                 images['front'] = src
+
+    for k in images:
+        if not images[k]: images[k] = None
 
     return images
