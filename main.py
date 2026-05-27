@@ -15,6 +15,11 @@ app.add_middleware(
 
 TTB_KEY = "ttbwldusdydy1845001"
 
+# 🌟 [추가된 부분] cron-job.org가 14분마다 두드릴 빈 페이지(대문)입니다!
+@app.get("/")
+def keep_alive():
+    return {"status": "alive", "message": "Shelfy Aladin API Server is running! 🚀"}
+
 @app.get("/api/search")
 def search_books(query: str):
     url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
