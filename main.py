@@ -15,11 +15,6 @@ app.add_middleware(
 
 TTB_KEY = "ttbwldusdydy1845001"
 
-# 🌟 [추가된 부분] cron-job.org가 14분마다 두드릴 빈 페이지(대문)입니다!
-@app.get("/")
-def keep_alive():
-    return {"status": "alive", "message": "Shelfy Aladin API Server is running! 🚀"}
-
 @app.get("/api/search")
 def search_books(query: str):
     url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
@@ -97,3 +92,65 @@ def get_book_images(item_id: str):
             images['front'] = src.replace("coversum", "cover500").replace("cover200", "cover500")
 
     return images
+
+import firebase_admin
+from firebase_admin import credentials
+from firebase_admin import firestore
+from firebase_admin import messaging
+
+# 1. Firebase Admin 초기화
+try:
+    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("🔥 Firebase Admin 연결 완료! 푸시 알림 감시 시작...")
+except ValueError:
+    # 서버 재시작 시 이미 초기화된 경우 에러 방지
+    db = firestore.client()
+
+# 2. 실시간 데이터 감시를 위한 콜백 함수
+def on_snapshot(col_snapshot, changes, read_time):
+    for change in changes:
+        if change.type.name == 'ADDED':
+            notif = change.document.to_dict()
+            
+            # 이미 읽은 알림이거나 과거 알림이면 패스
+            if notif.get('isRead'):
+                continue
+                
+            try:
+                # 데이터베이스 경로를 쪼개서 UID(고유 ID) 찾아내기
+                # 경로: artifacts/typerecord-app-v1/users/{UID}/notifications/{notifId}
+                path_segments = change.document.reference.path.split('/')
+                target_uid = path_segments[3]
+
+                # 알림 받을 유저의 정보(토큰) 가져오기
+                user_ref = db.document(f"artifacts/typerecord-app-v1/public/data/users/{target_uid}")
+                user_snap = user_ref.get()
+
+                if user_snap.exists:
+                    user_data = user_snap.to_dict()
+
+                    if user_data.get('pushEnabled') and user_data.get('fcmToken'):
+                        title = f"{notif.get('fromName')}님의 알림" if notif.get('fromName') else 'Shelfy'
+                        
+                        # 푸시 메시지 포장
+                        message = messaging.Message(
+                            notification=messaging.Notification(
+                                title=title,
+                                body=notif.get('message')
+                            ),
+                            token=user_data.get('fcmToken')
+                        )
+                        
+                        # 실제 기기로 발송!
+                        messaging.send(message)
+                        print(f"✅ 푸시 전송 성공: {user_data.get('displayName')}님에게 발송됨")
+            except Exception as e:
+                print(f"❌ 푸시 전송 실패: {e}")
+
+# 3. FastAPI 서버가 시작될 때 감시자(Listener) 작동시키기
+@app.on_event("startup")
+def start_firestore_listener():
+    col_query = db.collection_group('notifications')
+    col_query.on_snapshot(on_snapshot)
