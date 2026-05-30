@@ -131,20 +131,51 @@ def resolve_aladin_item_id(lookup_id):
     return raw
 
 
+def classify_aladin_image_url(src):
+    """알라딘 이미지 URL의 경로/파일명 패턴으로 표지·책등·뒷표지를 분류한다."""
+    normalized = normalize_aladin_image_url(src)
+    if not normalized:
+        return None, None
+
+    lower = normalized.lower()
+
+    # 미리보기(wletslookViewer) 쪽에서 자주 쓰는 패턴
+    # .../letslook/Sxxxx_fl.jpg = 앞표지
+    # .../Spine/Sxxxx_d.jpg 또는 .../spineflip/Sxxxx_d.jpg = 책등
+    # .../letslook/Sxxxx_bl.jpg 또는 ..._b.jpg = 뒷표지
+    if '/spine/' in lower or '/spineflip/' in lower or re.search(r'_(d|s|sl)\.(jpg|png)$', lower):
+        return 'spine', normalized
+    if re.search(r'_(bl|b|wbl)\.(jpg|png)$', lower):
+        return 'back', normalized
+    if re.search(r'_(fl|f|wfl|1|2)\.(jpg|png)$', lower) or '/cover500/' in lower or '/cover/' in lower:
+        return 'front', normalized
+
+    return None, normalized
+
+
+def scan_aladin_image_urls(html):
+    """HTML에 직접 들어 있는 알라딘 이미지 URL을 전체 스캔한다."""
+    found = {"front": None, "spine": None, "back": None}
+    urls = re.findall(r"(?:https?:)?//image\.aladin\.co\.kr/product/[^\"'\s>)]+(?:\.jpg|\.png)", html, re.IGNORECASE)
+    for src in urls:
+        key, normalized = classify_aladin_image_url(src)
+        if key and not found[key]:
+            found[key] = normalized
+    return found, urls
+
+
 def extract_preview_page_images(item_id, headers):
     """알라딘 미리보기 페이지(wletslookViewer)에서 책 표지/책등/뒷표지 이미지를 추출한다."""
     preview_url = f"https://www.aladin.co.kr/shop/book/wletslookViewer.aspx?ItemId={item_id}"
     found = {"front": None, "spine": None, "back": None}
     try:
-        response = requests.get(preview_url, headers=headers, timeout=5)
+        response = requests.get(preview_url, headers=headers, timeout=8)
         if response.status_code != 200:
             return found
-        soup = BeautifulSoup(response.text, 'html.parser')
+        html = response.text
+        soup = BeautifulSoup(html, 'html.parser')
 
-        # 미리보기 페이지 클래스 기준
-        # class="pageType2 rightpage" = 책 표지
-        # class="bookspine" = 책등
-        # class="pageType3 leftpage" = 책 뒷표지
+        # 1) 브라우저 DOM에 클래스가 직접 잡히는 경우
         selectors = {
             "front": [".pageType2.rightpage", ".pageType2 .rightpage"],
             "spine": [".bookspine"],
@@ -160,6 +191,14 @@ def extract_preview_page_images(item_id, headers):
                         break
                 if found[key]:
                     break
+
+        # 2) requests/BeautifulSoup에서는 클래스 DOM이 안 보이는 경우가 있어
+        #    HTML 안의 이미지 URL 자체를 스캔한다.
+        scanned, _ = scan_aladin_image_urls(html)
+        for key in ['front', 'spine', 'back']:
+            if not found[key] and scanned.get(key):
+                found[key] = scanned[key]
+
     except Exception as e:
         print(f"알라딘 미리보기 페이지 이미지 추출 실패: {e}")
     return found
@@ -226,7 +265,7 @@ def get_book_images(item_id: str):
         
         if not images['back'] and re.search(r'(/letslook/|_(b|bl|wbl)\.jpg)$', src, re.IGNORECASE):
             images['back'] = src
-        elif not images['spine'] and re.search(r'(/spineflip/|_(d|s|sl)\.jpg)$', src, re.IGNORECASE):
+        elif not images['spine'] and re.search(r'(/spine/|/spineflip/|_(d|s|sl)\.jpg)$', src, re.IGNORECASE):
             images['spine'] = src
         elif not images['front'] and re.search(r'(/cover500/|_(f|wfl|2)\.jpg)$', src, re.IGNORECASE):
             images['front'] = src
