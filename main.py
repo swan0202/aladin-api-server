@@ -96,6 +96,41 @@ def extract_class_image(soup, class_name):
     return None
 
 
+
+def resolve_aladin_item_id(lookup_id):
+    """앱에서 ISBN13/ISBN10이 넘어와도 알라딘 내부 ItemId로 변환한다."""
+    if not lookup_id:
+        return None
+    raw = str(lookup_id).strip()
+
+    # 알라딘 ItemId는 보통 13자리 ISBN보다 짧다. ISBN13은 978/979로 시작한다.
+    digits = re.sub(r'[^0-9Xx]', '', raw)
+    is_isbn13 = len(digits) == 13 and digits.startswith(('978', '979'))
+    is_isbn10 = len(digits) == 10
+
+    if not is_isbn13 and not is_isbn10:
+        return raw
+
+    try:
+        url = "http://www.aladin.co.kr/ttb/api/ItemLookUp.aspx"
+        params = {
+            "ttbkey": TTB_KEY,
+            "ItemId": digits,
+            "ItemIdType": "ISBN13" if is_isbn13 else "ISBN",
+            "output": "js",
+            "Version": "20131101"
+        }
+        response = requests.get(url, params=params, timeout=5)
+        data = response.json()
+        items = data.get("item") or []
+        if items and items[0].get("itemId"):
+            return str(items[0]["itemId"])
+    except Exception as e:
+        print(f"알라딘 ItemId 변환 실패: {e}")
+
+    return raw
+
+
 def extract_preview_page_images(item_id, headers):
     """알라딘 미리보기 페이지(wletslookViewer)에서 책 표지/책등/뒷표지 이미지를 추출한다."""
     preview_url = f"https://www.aladin.co.kr/shop/book/wletslookViewer.aspx?ItemId={item_id}"
@@ -131,7 +166,8 @@ def extract_preview_page_images(item_id, headers):
 
 @app.get("/api/get-book-images")
 def get_book_images(item_id: str):
-    url = f"https://www.aladin.co.kr/shop/wproduct.aspx?ItemId={item_id}"
+    resolved_item_id = resolve_aladin_item_id(item_id)
+    url = f"https://www.aladin.co.kr/shop/wproduct.aspx?ItemId={resolved_item_id}"
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     response = requests.get(url, headers=headers)
     html = response.text
@@ -148,7 +184,7 @@ def get_book_images(item_id: str):
     # 2순위: 알라딘 미리보기 페이지(wletslookViewer)의 명시적 클래스에서 가져오기
     # class="pageType2 rightpage" = 책 표지 / class="bookspine" = 책등 / class="pageType3 leftpage" = 책 뒷표지
     if not all(images.values()):
-        preview_images = extract_preview_page_images(item_id, headers)
+        preview_images = extract_preview_page_images(resolved_item_id, headers)
         for key in ['front', 'spine', 'back']:
             if not images[key] and preview_images.get(key):
                 images[key] = preview_images[key]
@@ -195,6 +231,7 @@ def get_book_images(item_id: str):
         elif not images['front'] and re.search(r'(/cover500/|_(f|wfl|2)\.jpg)$', src, re.IGNORECASE):
             images['front'] = src
 
+    images["resolvedItemId"] = resolved_item_id
     return images
 
 import firebase_admin
