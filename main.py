@@ -61,63 +61,297 @@ def ttb_search_proxy(Query: str):
 # ==========================================
 # 🌟 [신규] 알라딘 텍스트 (책소개, 책속에서) 스크래핑 로직
 # ==========================================
+def clean_text(value: str) -> str:
+    if not value:
+        return ""
+
+    value = re.sub(r"\r", "\n", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    value = re.sub(r"[ \t]{2,}", " ", value)
+
+    remove_words = [
+        "접기",
+        "펼쳐보기",
+        "더보기",
+        "책소개 전체",
+        "공유하기",
+        "보관함",
+        "장바구니",
+        "바로구매",
+        "마이리스트",
+    ]
+
+    for word in remove_words:
+        value = value.replace(word, "")
+
+    return value.strip()
+
+
+def extract_text_lines_from_soup(soup):
+    for tag in soup(["script", "style", "noscript", "iframe", "button"]):
+        tag.decompose()
+
+    text = soup.get_text("\n")
+    lines = []
+
+    for line in text.split("\n"):
+        line = clean_text(line)
+        if not line:
+            continue
+        if len(line) <= 1:
+            continue
+        lines.append(line)
+
+    return lines
+
+
+def extract_section_by_heading(lines, start_headings, stop_headings):
+    start_index = -1
+
+    for i, line in enumerate(lines):
+        normalized = line.replace(" ", "")
+
+        for heading in start_headings:
+            normalized_heading = heading.replace(" ", "")
+
+            if normalized == normalized_heading:
+                start_index = i
+                break
+
+            if normalized_heading in normalized and len(normalized) <= 40:
+                start_index = i
+                break
+
+        if start_index != -1:
+            break
+
+    if start_index == -1:
+        return ""
+
+    end_index = len(lines)
+
+    for j in range(start_index + 1, len(lines)):
+        normalized = lines[j].replace(" ", "")
+
+        for stop in stop_headings:
+            normalized_stop = stop.replace(" ", "")
+
+            if normalized == normalized_stop:
+                end_index = j
+                break
+
+            if normalized_stop in normalized and len(normalized) <= 40:
+                end_index = j
+                break
+
+        if end_index != len(lines):
+            break
+
+    content = "\n".join(lines[start_index + 1:end_index])
+    return clean_text(content)
+
+
+def split_phrase_list(text: str):
+    if not text:
+        return []
+
+    # 문단 단위 우선 분리
+    raw_parts = re.split(r"\n{2,}", text)
+    phrases = []
+
+    for part in raw_parts:
+        part = clean_text(part)
+
+        if not part:
+            continue
+
+        # 문단 분리가 안 된 경우 줄 단위로 한 번 더 분리
+        if len(part) > 600:
+            sub_parts = [clean_text(x) for x in part.split("\n") if clean_text(x)]
+            phrases.extend(sub_parts)
+        else:
+            phrases.append(part)
+
+    # 너무 짧은 UI 문구 제거
+    phrases = [p for p in phrases if len(p) >= 10]
+
+    # 중복 제거
+    result = []
+    seen = set()
+
+    for phrase in phrases:
+        key = phrase[:80]
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(phrase)
+
+    return result[:20]
+
+
+def extract_by_original_boxes(soup):
+    """
+    알라딘의 기존 상세 박스 구조에서 우선 추출.
+    구조가 맞는 책은 여기서 가장 깔끔하게 추출됨.
+    """
+    texts = {
+        "story": "",
+        "description": "",
+        "phrases": [],
+        "mdRecommend": ""
+    }
+
+    boxes = soup.select(".Ere_prod_mconts_box")
+
+    for box in boxes:
+        title_el = box.select_one(".Ere_prod_mconts_LS")
+        if not title_el:
+            continue
+
+        title = title_el.get_text(" ", strip=True)
+        content_el = box.select_one(".Ere_prod_mconts_R") or box
+
+        # 원본 box를 직접 망가뜨리지 않도록 복사해서 처리
+        content_soup = BeautifulSoup(str(content_el), "html.parser")
+
+        for unwanted in content_soup(["script", "style", "noscript", "iframe", "button"]):
+            unwanted.decompose()
+
+        title_in_content = content_soup.select_one(".Ere_prod_mconts_LS")
+        if title_in_content:
+            title_in_content.decompose()
+
+        text_content = clean_text(content_soup.get_text("\n"))
+        html_content = content_soup.decode_contents().strip()
+
+        if "책소개" in title and "출판사" not in title:
+            texts["story"] = text_content or html_content
+
+        elif ("출판사" in title and ("책소개" in title or "상품소개" in title)) or "출판사 제공" in title:
+            texts["description"] = text_content or html_content
+
+        elif "책속에서" in title or "밑줄" in title:
+            texts["phrases"] = split_phrase_list(text_content)
+
+        elif "편집장의 선택" in title or "편집장" in title:
+            texts["mdRecommend"] = text_content or html_content
+
+    return texts
+
+
 def scrape_aladin_texts(item_id):
-    """알라딘 상세페이지 HTML을 직접 긁어와서 텍스트 정보를 추출합니다."""
+    """
+    알라딘 상세페이지에서
+    책소개, 책속에서, 편집장의 선택, 출판사 제공 상품소개를 추출.
+    """
     resolved_id = resolve_aladin_item_id(item_id)
     url = f"https://www.aladin.co.kr/shop/wproduct.aspx?ItemId={resolved_id}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
-    texts = {
-        "story": "",          # 책소개 (줄거리)
-        "description": "",    # 출판사 제공 책소개
-        "phrases": [],        # 책속에서 (밑줄 긋기)
-        "mdRecommend": ""     # 편집장의 선택
-    }
-    
-    try:
-        res = requests.get(url, headers=headers, timeout=5)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # 알라딘 상세페이지의 각 정보 박스들을 순회
-        boxes = soup.select('.Ere_prod_mconts_box')
-        for box in boxes:
-            title_el = box.select_one('.Ere_prod_mconts_LS')
-            if not title_el:
-                continue
-                
-            title = title_el.get_text(strip=True)
-            content_el = box.select_one('.Ere_prod_mconts_R')
-            
-            if not content_el:
-                # 우측 컨텐츠 영역이 따로 없다면, 제목을 제외한 박스 전체를 사용
-                content_el = box
-                if content_el.select_one('.Ere_prod_mconts_LS'):
-                    content_el.select_one('.Ere_prod_mconts_LS').decompose()
-            
-            # 불필요한 태그 제거 (스크립트, 인라인 스타일, 버튼 등)
-            for unwanted in content_el(["script", "style", "iframe", "button"]):
-                unwanted.decompose()
 
-            # HTML 구조를 살려서 텍스트 추출 (프론트에서 dangerouslySetInnerHTML로 렌더링)
-            inner_html = content_el.encode_contents().decode('utf-8').strip()
-            
-            if '책소개' in title and '출판사' not in title:
-                texts['story'] = inner_html
-            elif '출판사' in title and '책소개' in title:
-                texts['description'] = inner_html
-            elif '책속에서' in title or '밑줄 긋기' in title:
-                # 책속에서는 li나 p태그로 나뉜 경우가 많으므로 텍스트만 깔끔하게 리스트로 분리
-                phrases = []
-                for string in content_el.stripped_strings:
-                    if len(string) > 5: # 불필요한 기호나 너무 짧은 문자열 제외
-                        phrases.append(string)
-                texts['phrases'] = phrases
-            elif '편집장' in title or '추천글' in title:
-                texts['mdRecommend'] = inner_html
-                
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Referer": "https://www.aladin.co.kr/",
+    }
+
+    texts = {
+        "story": "",
+        "description": "",
+        "phrases": [],
+        "mdRecommend": "",
+        "sourceUrl": url,
+    }
+
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # 1차: 알라딘 상세 박스 구조에서 추출
+        boxed_texts = extract_by_original_boxes(soup)
+
+        for key in ["story", "description", "mdRecommend"]:
+            if boxed_texts.get(key):
+                texts[key] = boxed_texts[key]
+
+        if boxed_texts.get("phrases"):
+            texts["phrases"] = boxed_texts["phrases"]
+
+        # 2차: 박스 구조로 못 찾은 경우, 전체 텍스트에서 제목 기준으로 추출
+        lines = extract_text_lines_from_soup(soup)
+
+        stop_headings = [
+            "책소개",
+            "줄거리",
+            "책속에서",
+            "밑줄긋기",
+            "편집장의 선택",
+            "출판사 제공 책소개",
+            "출판사 제공 상품소개",
+            "출판사 리뷰",
+            "저자소개",
+            "저자 소개",
+            "목차",
+            "추천글",
+            "기본정보",
+            "상품정보",
+            "회원리뷰",
+            "마이리뷰",
+            "리뷰",
+            "이벤트",
+            "관련분류",
+        ]
+
+        if not texts["story"]:
+            texts["story"] = extract_section_by_heading(
+                lines,
+                ["책소개", "줄거리"],
+                stop_headings,
+            )
+
+        if not texts["mdRecommend"]:
+            texts["mdRecommend"] = extract_section_by_heading(
+                lines,
+                ["편집장의 선택"],
+                stop_headings,
+            )
+
+        if not texts["phrases"]:
+            phrase_text = extract_section_by_heading(
+                lines,
+                ["책속에서", "밑줄긋기", "밑줄 긋기"],
+                stop_headings,
+            )
+            texts["phrases"] = split_phrase_list(phrase_text)
+
+        if not texts["description"]:
+            texts["description"] = extract_section_by_heading(
+                lines,
+                ["출판사 제공 상품소개", "출판사 제공 책소개"],
+                stop_headings,
+            )
+
+        if not texts["description"]:
+            texts["description"] = extract_section_by_heading(
+                lines,
+                ["출판사 리뷰"],
+                stop_headings,
+            )
+
+        print(
+            f"✅ 알라딘 텍스트 스크래핑 완료: "
+            f"story={bool(texts['story'])}, "
+            f"description={bool(texts['description'])}, "
+            f"phrases={len(texts['phrases'])}, "
+            f"mdRecommend={bool(texts['mdRecommend'])}"
+        )
+
     except Exception as e:
-        print(f"텍스트 스크래핑 실패: {e}")
-        
+        print(f"❌ 텍스트 스크래핑 실패: {e}")
+
     return texts
 
 # ==========================================
@@ -151,7 +385,12 @@ def ttb_lookup_proxy(ItemId: str, itemIdType: str = "ItemId", OptResult: str = "
             sub_info = item.get("subInfo", {})
             
             # 책소개(story)나 책속에서(phraseList)가 비어있다면 크롤링 발동!
-            if not sub_info.get("story") or not sub_info.get("phraseList"):
+            if (
+            not sub_info.get("story")
+            or not sub_info.get("phraseList")
+            or not sub_info.get("fulldescription2")
+            or not sub_info.get("mdrecommend")
+        ):
                 print(f"[{ItemId}] 알라딘 API 텍스트 정보 부족. 크롤링으로 보강을 시도합니다...")
                 scraped = scrape_aladin_texts(ItemId)
                 
