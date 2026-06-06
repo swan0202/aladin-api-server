@@ -37,6 +37,37 @@ def search_books(query: str):
                 book["cover"] = book["cover"].replace("coversum", "cover500").replace("cover200", "cover500").replace("/cover/", "/cover500/")
     return data
 
+@app.get("/api/ttb/search")
+def ttb_search_proxy(Query: str):
+    """프론트엔드의 corsproxy.io 우회를 위한 검색 대리 호출 API"""
+    url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
+    params = {
+        "ttbkey": TTB_KEY,
+        "Query": Query,
+        "QueryType": "Keyword",
+        "MaxResults": 1,
+        "start": 1,
+        "output": "js",
+        "Version": "20131101"
+    }
+    response = requests.get(url, params=params)
+    return response.json()
+
+@app.get("/api/ttb/lookup")
+def ttb_lookup_proxy(ItemId: str, itemIdType: str = "ItemId", OptResult: str = ""):
+    """프론트엔드의 corsproxy.io 우회를 위한 상세조회 대리 호출 API"""
+    url = "http://www.aladin.co.kr/ttb/api/ItemLookUp.aspx"
+    params = {
+        "ttbkey": TTB_KEY,
+        "ItemId": ItemId,
+        "itemIdType": itemIdType,
+        "OptResult": OptResult,
+        "output": "js",
+        "Version": "20131101"
+    }
+    response = requests.get(url, params=params)
+    return response.json()
+
 # 실제 이미지가 존재하는지 빠르게 확인하는 함수
 def check_url(url):
     try:
