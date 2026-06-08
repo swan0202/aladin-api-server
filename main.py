@@ -18,6 +18,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/ping")
+def keep_awake():
+    return {"status": "ok"}
+
 TTB_KEY = "ttbwldusdydy1845001"
 
 @app.get("/api/search")
