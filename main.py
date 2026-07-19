@@ -266,17 +266,37 @@ def extract_by_original_boxes(soup: BeautifulSoup) -> dict:
             texts["mdRecommend"] = text_content or html_content
     return texts
 
-def resolve_aladin_item_id(lookup_id: str) -> str:
+def resolve_aladin_item_id(lookup_id: str, title: str = "", author: str = "", publisher: str = "") -> str:
     if not lookup_id:
         return ""
     raw = str(lookup_id).strip()
-    digits = re.sub(r"[^0-9Xx]", "", raw)
     
-    is_isbn13 = len(digits) == 13 and digits.startswith(("978", "979"))
-    is_isbn10 = len(digits) == 10
-    
-    if not is_isbn13 and not is_isbn10:
-        return raw
+    # 💡 카카오 API에서 ISBN을 못 찾아서 가짜 UUID나 이상한 값이 넘어오면 제목+저자+출판사로 검색어를 바꿉니다.
+    search_query = raw
+    if not raw.isdigit() or len(raw) < 10:
+        if title or author:
+            search_query = f"{title} {author} {publisher}".strip()
+        else:
+            return raw
+
+    try:
+        search_url = f"{ALADIN_WEB_BASE}/search/wsearchresult.aspx"
+        params = {"SearchTarget": "Book", "SearchWord": search_query}
+        
+        response = safe_requests_get(search_url, params=params, headers=DEFAULT_HEADERS, timeout=(5, 10))
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            # 💡 알라딘 검색 결과의 첫 번째 책 링크(a.bo3)에서 정확한 ItemId를 뽑아옵니다.
+            first_link = soup.select_one("a.bo3")
+            if first_link and first_link.get("href"):
+                match = re.search(r"ItemId=(\d+)", first_link["href"], re.IGNORECASE)
+                if match:
+                    return str(match.group(1))
+    except Exception as error:
+        print(f"웹 스크래핑 기반 검색 우회 실패: {error}")
+
+    return raw
 
     # 1️⃣ 먼저 원래 방식인 TTB API 호출을 시도합니다.
     try:
@@ -357,53 +377,28 @@ def scrape_aladin_texts(item_id: str) -> dict:
     except requests.RequestException as error:
         print(f"텍스트 스크래핑 실패: {error}")
     return texts
+
 @app.get("/api/ttb/lookup")
 def ttb_lookup_proxy(
     ItemId: str = Query(..., min_length=1),
     itemIdType: str = Query("ItemId"),
     OptResult: str = Query(""),
+    title: str = Query(""),
+    author: str = Query(""),
+    publisher: str = Query("")
 ):
-    # 1️⃣ 먼저 원래 방식인 TTB API 호출을 시도합니다.
     try:
-        data = aladin_api_get(
-            "ItemLookUp.aspx",
-            {
-                "ItemId": ItemId,
-                "ItemIdType": itemIdType,
-                "OptResult": OptResult,
-            },
-        )
-        
+        data = aladin_api_get("ItemLookUp.aspx", {"ItemId": ItemId, "ItemIdType": itemIdType, "OptResult": OptResult})
         items = data.get("item") or []
-        if not items:
+        if items:
             return data
-            
-        item = items[0]
-        sub_info = item.get("subInfo") or {}
-        should_scrape = (not sub_info.get("story") or not sub_info.get("phraseList") or not sub_info.get("fulldescription2") or not sub_info.get("mdrecommend"))
-        if should_scrape:
-            scraped = scrape_aladin_texts(ItemId)
-            if not sub_info.get("story") and scraped["story"]:
-                sub_info["story"] = scraped["story"]
-            if not sub_info.get("fulldescription2") and scraped["description"]:
-                sub_info["fulldescription2"] = scraped["description"]
-            if not sub_info.get("mdrecommend") and scraped["mdRecommend"]:
-                sub_info["mdrecommend"] = scraped["mdRecommend"]
-            if not sub_info.get("phraseList") and scraped["phrases"]:
-                sub_info["phraseList"] = [{"phrase": phrase} for phrase in scraped["phrases"]]
-        if item.get("cover"):
-            item["cover"] = normalize_cover_url(item["cover"])
-        item["subInfo"] = sub_info
-        data["item"][0] = item
-        return data
-        
-    except Exception as error:
-        print(f"알라딘 API 접근 실패, 스크래핑으로 우회합니다: {error}")
+    except Exception:
+        pass
 
-    # 2️⃣ API가 막혀있다면 직접 웹 스크래핑하여 가짜 JSON 응답을 만듭니다.
     resolved_id = ItemId
-    if itemIdType.upper() in ["ISBN", "ISBN13"]:
-        resolved_id = resolve_aladin_item_id(ItemId)
+    # 💡 UUID거나 ISBN일 때 제목+저자+출판사로 검색 진행
+    if itemIdType.upper() in ["ISBN", "ISBN13"] or not ItemId.isdigit():
+        resolved_id = resolve_aladin_item_id(ItemId, title, author, publisher)
         
     scraped = scrape_aladin_texts(resolved_id)
     
@@ -415,23 +410,21 @@ def ttb_lookup_proxy(
             page_match = re.search(r"(\d+)\s*쪽", response.text)
             if page_match:
                 item_page = int(page_match.group(1))
-    except Exception as error:
-        print(f"페이지 수 추출 실패: {error}")
+    except Exception:
+        pass
 
     return {
-        "item": [
-            {
-                "itemId": resolved_id,
-                "subInfo": {
-                    "itemPage": item_page,
-                    "story": scraped.get("story", ""),
-                    "fulldescription": scraped.get("description", ""),
-                    "fulldescription2": scraped.get("description", ""),
-                    "mdrecommend": scraped.get("mdRecommend", ""),
-                    "phraseList": [{"phrase": p} for p in scraped.get("phrases", [])]
-                }
+        "item": [{
+            "itemId": resolved_id,
+            "subInfo": {
+                "itemPage": item_page,
+                "story": scraped.get("story", ""),
+                "fulldescription": scraped.get("description", ""),
+                "fulldescription2": scraped.get("description", ""),
+                "mdrecommend": scraped.get("mdRecommend", ""),
+                "phraseList": [{"phrase": p} for p in scraped.get("phrases", [])]
             }
-        ]
+        }]
     }
 
 def check_url(url: str) -> bool:
@@ -480,10 +473,20 @@ def extract_image_from_node(node) -> Optional[str]:
     return None
 
 def extract_class_image(soup: BeautifulSoup, class_name: str) -> Optional[str]:
-    for node in soup.select(f".{class_name}"):
-        image_url = extract_image_from_node(node)
-        if image_url:
-            return image_url
+    # 💡 직접 확인하신 HTML 구조에 맞게 <div class="c_left"> 안의 <img>를 정확히 타겟팅합니다.
+    div_node = soup.select_one(f".{class_name}")
+    if not div_node:
+        return None
+        
+    img = div_node.select_one("img")
+    if img and img.get("src"):
+        return normalize_aladin_image_url(img["src"])
+        
+    style = div_node.get("style", "")
+    match = re.search(r"url\(['\"]?([^'\")]+)['\"]?\)", style, re.IGNORECASE)
+    if match:
+        return normalize_aladin_image_url(match.group(1))
+        
     return None
 
 def classify_aladin_image_url(src: str) -> tuple[Optional[str], Optional[str]]:
@@ -541,43 +544,48 @@ def extract_preview_page_images(item_id: str, headers: dict) -> dict:
     return found
 
 @app.get("/api/get-book-images")
-def get_book_images(item_id: str = Query(..., min_length=1)):
-    resolved_item_id = resolve_aladin_item_id(item_id)
+def get_book_images(
+    item_id: str = Query(..., min_length=1),
+    title: str = Query(""),
+    author: str = Query(""),
+    publisher: str = Query("")
+):
+    # 위에서 만든 함수를 통해 최종적으로 올바른 ItemId를 찾아냅니다.
+    resolved_item_id = resolve_aladin_item_id(item_id, title, author, publisher)
     url = f"{ALADIN_WEB_BASE}/shop/wproduct.aspx?ItemId={resolved_item_id}"
+    
     images = {"front": None, "spine": None, "back": None, "resolvedItemId": resolved_item_id}
     try:
-        # 💡 우회 터널 사용
-        response = safe_requests_get(
-            url,
-            headers=DEFAULT_HEADERS,
-            timeout=(5, 15),
-        )
+        response = safe_requests_get(url, headers=DEFAULT_HEADERS, timeout=(5, 15))
         response.raise_for_status()
     except requests.RequestException as error:
         raise HTTPException(
             status_code=502,
             detail={"message": "알라딘 상품 페이지를 불러오지 못했습니다.", "reason": str(error)},
         )
+        
     html = response.text
     soup = BeautifulSoup(html, "html.parser")
+    
+    # 💡 짚어주신 c_front, c_left, c_back을 여기서 최우선으로 가져옵니다!
     images["front"] = extract_class_image(soup, "c_front")
     images["spine"] = extract_class_image(soup, "c_left")
     images["back"] = extract_class_image(soup, "c_back")
+    
     if not all([images["front"], images["spine"], images["back"]]):
         preview_images = extract_preview_page_images(resolved_item_id, DEFAULT_HEADERS)
         for key in ["front", "spine", "back"]:
             if not images[key] and preview_images.get(key):
                 images[key] = preview_images[key]
+                
     all_urls = re.findall(r'(?:https?:)?//image\.aladin\.co\.kr/product/[^"\'\s>)]+(?:\.jpg|\.png)', html, re.IGNORECASE)
     cover_url = None
     for src in all_urls:
         normalized_src = normalize_aladin_image_url(src)
-        if not normalized_src:
-            continue
+        if not normalized_src: continue
         if "cover" in normalized_src.lower() and re.search(r"_\d\.", normalized_src):
             cover_url = normalized_src
-            if not images["front"]:
-                images["front"] = normalized_src
+            if not images["front"]: images["front"] = normalized_src
             break
     if cover_url:
         match = re.search(r"(https?://image\.aladin\.co\.kr/product/\d+/\d+/)(?:[^/]+)/([^/]+?)_\d.*?\.(?:jpg|png)", cover_url, re.IGNORECASE)
@@ -586,18 +594,12 @@ def get_book_images(item_id: str = Query(..., min_length=1)):
             base_name = match.group(2)
             spine_guess = f"{base_path}spineflip/{base_name}_d.jpg"
             back_guess = f"{base_path}letslook/{base_name}_b.jpg"
-            if not images["spine"] and check_url(spine_guess):
-                images["spine"] = spine_guess
-            if not images["back"] and check_url(back_guess):
-                images["back"] = back_guess
+            if not images["spine"] and check_url(spine_guess): images["spine"] = spine_guess
+            if not images["back"] and check_url(back_guess): images["back"] = back_guess
     for src in all_urls:
         normalized_src = normalize_aladin_image_url(src)
-        if not normalized_src:
-            continue
-        if not images["back"] and re.search(r"(/letslook/|_(b|bl|wbl)\.jpg)$", normalized_src, re.IGNORECASE):
-            images["back"] = normalized_src
-        elif not images["spine"] and re.search(r"(/spine/|/spineflip/|_(d|s|sl)\.jpg)$", normalized_src, re.IGNORECASE):
-            images["spine"] = normalized_src
-        elif not images["front"] and re.search(r"(/cover500/|_(f|wfl|2)\.jpg)$", normalized_src, re.IGNORECASE):
-            images["front"] = normalized_src
+        if not normalized_src: continue
+        if not images["back"] and re.search(r"(/letslook/|_(b|bl|wbl)\.jpg)$", normalized_src, re.IGNORECASE): images["back"] = normalized_src
+        elif not images["spine"] and re.search(r"(/spine/|/spineflip/|_(d|s|sl)\.jpg)$", normalized_src, re.IGNORECASE): images["spine"] = normalized_src
+        elif not images["front"] and re.search(r"(/cover500/|_(f|wfl|2)\.jpg)$", normalized_src, re.IGNORECASE): images["front"] = normalized_src
     return images
