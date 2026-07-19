@@ -38,7 +38,13 @@ def search_books(query: str):
         "Version": "20131101"
     }
     response = requests.get(url, params=params)
-    data = response.json()
+    
+    try:
+        data = response.json()
+    except Exception as e:
+        print("🚨 알라딘 API 에러 발생:", response.text)
+        return {"item": []}
+        
     if "item" in data:
         for book in data["item"]:
             if "cover" in book:
