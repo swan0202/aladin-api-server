@@ -32,17 +32,38 @@ DEFAULT_HEADERS = {
     "Referer": "https://www.aladin.co.kr/",
 }
 
-# 💡 알라딘의 IP 차단을 우회하기 위한 프록시 터널 함수 추가
-def safe_requests_get(url: str, params: dict = None, headers: dict = None, timeout=(5, 15), stream=False):
+# 💡 알라딘의 IP 차단을 우회하기 위한 프록시 터널 함수 개선 (다중 프록시 + 타임아웃 연장)
+def safe_requests_get(url: str, params: dict = None, headers: dict = None, timeout=(5, 20), stream=False):
     if params:
         req_url = url + "?" + urllib.parse.urlencode(params)
     else:
         req_url = url
         
-    # 프록시 우회 주소 생성
-    proxy_url = "https://api.allorigins.win/raw?url=" + urllib.parse.quote(req_url)
+    # 여러 무료 우회 프록시를 순차적으로 시도합니다. (하나가 막히거나 느리면 다음 것으로 넘어감)
+    proxies = [
+        "https://corsproxy.io/?" + urllib.parse.quote(req_url),
+        "https://api.allorigins.win/raw?url=" + urllib.parse.quote(req_url),
+        "https://api.codetabs.com/v1/proxy?quest=" + urllib.parse.quote(req_url)
+    ]
     
-    return requests.get(proxy_url, headers=headers, timeout=timeout, stream=stream)
+    last_error = None
+    for proxy_url in proxies:
+        try:
+            # 타임아웃을 15초에서 20초로 늘려 안정성을 확보합니다.
+            response = requests.get(proxy_url, headers=headers, timeout=timeout, stream=stream)
+            if response.status_code == 200:
+                return response
+        except requests.RequestException as error:
+            print(f"프록시 접속 실패 ({proxy_url}): {error}")
+            last_error = error
+            continue
+            
+    # 모든 프록시가 실패했을 경우 최후의 에러를 던집니다.
+    if last_error:
+        raise last_error
+        
+    # 만약 에러 없이 반복문이 끝났다면 (거의 발생하지 않음) 다이렉트 요청 시도
+    return requests.get(req_url, headers=headers, timeout=timeout, stream=stream)
 
 @app.get("/")
 def read_root():
