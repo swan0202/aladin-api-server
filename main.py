@@ -271,10 +271,14 @@ def resolve_aladin_item_id(lookup_id: str) -> str:
         return ""
     raw = str(lookup_id).strip()
     digits = re.sub(r"[^0-9Xx]", "", raw)
+    
     is_isbn13 = len(digits) == 13 and digits.startswith(("978", "979"))
     is_isbn10 = len(digits) == 10
+    
     if not is_isbn13 and not is_isbn10:
         return raw
+
+    # 1️⃣ 먼저 원래 방식인 TTB API 호출을 시도합니다.
     try:
         data = aladin_api_get(
             "ItemLookUp.aspx",
@@ -286,8 +290,36 @@ def resolve_aladin_item_id(lookup_id: str) -> str:
         items = data.get("item") or []
         if items and items[0].get("itemId"):
             return str(items[0]["itemId"])
-    except HTTPException as error:
-        print(f"알라딘 ItemId 변환 실패: {error.detail}")
+    except Exception as error:
+        print(f"알라딘 API 접근 실패, 스크래핑으로 우회합니다: {error}")
+
+    # 2️⃣ API가 막혀있다면 스크래핑 우회 로직을 실행합니다.
+    try:
+        search_url = f"{ALADIN_WEB_BASE}/search/wsearchresult.aspx"
+        params = {
+            "SearchTarget": "Book",
+            "SearchWord": digits
+        }
+        
+        response = safe_requests_get(
+            search_url,
+            params=params,
+            headers=DEFAULT_HEADERS,
+            timeout=(5, 10)
+        )
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, "html.parser")
+            first_book_link = soup.select_one("a.bo3")
+            if first_book_link and first_book_link.get("href"):
+                href = first_book_link["href"]
+                match = re.search(r"ItemId=(\d+)", href, re.IGNORECASE)
+                if match:
+                    return str(match.group(1))
+                    
+    except Exception as error:
+        print(f"웹 스크래핑 기반 ISBN -> ItemId 변환 실패: {error}")
+
     return raw
 
 def scrape_aladin_texts(item_id: str) -> dict:
@@ -325,25 +357,27 @@ def scrape_aladin_texts(item_id: str) -> dict:
     except requests.RequestException as error:
         print(f"텍스트 스크래핑 실패: {error}")
     return texts
-
 @app.get("/api/ttb/lookup")
 def ttb_lookup_proxy(
     ItemId: str = Query(..., min_length=1),
     itemIdType: str = Query("ItemId"),
     OptResult: str = Query(""),
 ):
-    data = aladin_api_get(
-        "ItemLookUp.aspx",
-        {
-            "ItemId": ItemId,
-            "ItemIdType": itemIdType,
-            "OptResult": OptResult,
-        },
-    )
+    # 1️⃣ 먼저 원래 방식인 TTB API 호출을 시도합니다.
     try:
+        data = aladin_api_get(
+            "ItemLookUp.aspx",
+            {
+                "ItemId": ItemId,
+                "ItemIdType": itemIdType,
+                "OptResult": OptResult,
+            },
+        )
+        
         items = data.get("item") or []
         if not items:
             return data
+            
         item = items[0]
         sub_info = item.get("subInfo") or {}
         should_scrape = (not sub_info.get("story") or not sub_info.get("phraseList") or not sub_info.get("fulldescription2") or not sub_info.get("mdrecommend"))
@@ -361,9 +395,44 @@ def ttb_lookup_proxy(
             item["cover"] = normalize_cover_url(item["cover"])
         item["subInfo"] = sub_info
         data["item"][0] = item
+        return data
+        
     except Exception as error:
-        print(f"크롤링 데이터 병합 오류: {error}")
-    return data
+        print(f"알라딘 API 접근 실패, 스크래핑으로 우회합니다: {error}")
+
+    # 2️⃣ API가 막혀있다면 직접 웹 스크래핑하여 가짜 JSON 응답을 만듭니다.
+    resolved_id = ItemId
+    if itemIdType.upper() in ["ISBN", "ISBN13"]:
+        resolved_id = resolve_aladin_item_id(ItemId)
+        
+    scraped = scrape_aladin_texts(resolved_id)
+    
+    item_page = 0
+    url = f"{ALADIN_WEB_BASE}/shop/wproduct.aspx?ItemId={resolved_id}"
+    try:
+        response = safe_requests_get(url, headers=DEFAULT_HEADERS, timeout=(5, 10))
+        if response.status_code == 200:
+            page_match = re.search(r"(\d+)\s*쪽", response.text)
+            if page_match:
+                item_page = int(page_match.group(1))
+    except Exception as error:
+        print(f"페이지 수 추출 실패: {error}")
+
+    return {
+        "item": [
+            {
+                "itemId": resolved_id,
+                "subInfo": {
+                    "itemPage": item_page,
+                    "story": scraped.get("story", ""),
+                    "fulldescription": scraped.get("description", ""),
+                    "fulldescription2": scraped.get("description", ""),
+                    "mdrecommend": scraped.get("mdRecommend", ""),
+                    "phraseList": [{"phrase": p} for p in scraped.get("phrases", [])]
+                }
+            }
+        ]
+    }
 
 def check_url(url: str) -> bool:
     try:
