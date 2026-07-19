@@ -26,7 +26,8 @@ TTB_KEY = "ttbwldusdydy1845001"
 
 @app.get("/api/search")
 def search_books(query: str):
-    url = "http://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
+    # 💡 http -> https 로 변경되었습니다!
+    url = "https://www.aladin.co.kr/ttb/api/ItemSearch.aspx"
     params = {
         "ttbkey": TTB_KEY,
         "Query": query,
@@ -38,10 +39,15 @@ def search_books(query: str):
         "Version": "20131101"
     }
     
+    # 💡 경비원(CloudFront)을 완벽하게 속이는 진짜 브라우저 위장 세트
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Referer": "https://www.aladin.co.kr/"
     }
     
+    # 위장 세트(headers)를 챙겨서 https 보안 통로로 요청합니다.
     response = requests.get(url, params=params, headers=headers)
     
     try:
