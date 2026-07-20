@@ -320,15 +320,30 @@ def extract_image_from_node(node) -> Optional[str]:
     if match: return normalize_aladin_image_url(match.group(1))
     return None
 
-# 💡 HTML 클래스에서 정확하게 이미지 추출 (c_left, c_front, c_back)
 def extract_class_image(soup: BeautifulSoup, class_name: str) -> Optional[str]:
     div_node = soup.select_one(f".{class_name}")
-    if not div_node: return None
+    if not div_node:
+        return None
+    
     img = div_node.select_one("img")
-    if img and img.get("src"): return normalize_aladin_image_url(img["src"])
+    if img:
+        # data-src, data-original 등 lazy-loading 속성도 봄
+        url = extract_image_from_node(img)
+        if url:
+            return url
+    
+    # div 자체의 background-image 도 체크
     match = re.search(r"url\(['\"]?([^'\")]+)['\"]?\)", div_node.get("style", ""), re.IGNORECASE)
-    if match: return normalize_aladin_image_url(match.group(1))
+    if match:
+        return normalize_aladin_image_url(match.group(1))
+    
+    # div 자체에 data-src 등이 붙어있는 경우도 확인
+    for attr in ["data-src", "data-original", "data-url"]:
+        if div_node.get(attr):
+            return normalize_aladin_image_url(div_node.get(attr))
+    
     return None
+
 
 def extract_preview_page_images(item_id: str, headers: dict) -> dict:
     found = {"front": None, "spine": None, "back": None}
